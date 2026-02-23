@@ -1,18 +1,34 @@
-# YoloMode
+# ⚡ YoloMode
 
-**Auto-accept everything in Google Antigravity IDE.**
+**Stop clicking Accept. Let the AI work.**
 
-Install it, forget it. Agent steps, terminal commands, code edits — 
-all accepted automatically.
+YoloMode auto-accepts everything in Google Antigravity — agent steps, 
+terminal commands, code edits. Install it and never think about it again.
 
-## Background mode (optional)
+## Get started
 
-By default, auto-accept pauses when the IDE is minimized. It catches 
-up instantly when you restore the window.
+1. Open Extensions (Ctrl+Shift+X)
+2. Search **YoloMode**
+3. Install
 
-To keep it running while minimized, add these to your `argv.json` 
-(`%USERPROFILE%\.antigravity\argv.json` on Windows, 
-`~/.antigravity/argv.json` on Mac/Linux):
+That's it. YoloMode is already running.
+
+## Works best with
+
+Set these in Antigravity Settings for a fully autonomous workflow:
+
+| Setting | Value |
+|---------|-------|
+| cascadeAutoExecutionPolicy | Turbo |
+| browserJsExecutionPolicy | Turbo |
+| artifactReviewMode | Turbo |
+
+## Runs in the background
+
+Add these to `argv.json` to keep YoloMode active even when minimized:
+
+**Windows:** `%USERPROFILE%\.antigravity\argv.json`
+**Mac/Linux:** `~/.antigravity/argv.json`
 ```json
 {
   "disable-background-timer-throttling": true,
@@ -23,65 +39,16 @@ To keep it running while minimized, add these to your `argv.json`
 
 Restart the IDE after saving.
 
-## Install
-
-1. Open Antigravity → Extensions (Ctrl+Shift+X)
-2. Search **YoloMode**
-3. Install. Done.
-
-## How to use
-
-There's nothing to configure. YoloMode starts automatically.
-
-The status bar shows the current state:
-
-| Status | Meaning |
-|--------|---------|
-| ✅ **YOLO** | Actively accepting (agent is working) |
-| 👁 **YOLO** | Watching (cooling down) |
-| 🕐 **YOLO** | Idle (waiting for activity) |
-| ❌ **YOLO** | Disabled |
-
-**Toggle on/off:** `Ctrl+Alt+Shift+A` or click the status bar  
-**Force accept now:** `Ctrl+Alt+Shift+Y`
-
-## Recommended Antigravity settings
-
-For full hands-free mode, also set these in Antigravity Settings:
-
-- `cascadeAutoExecutionPolicy` → **Turbo**
-- `browserJsExecutionPolicy` → **Turbo**  
-- `artifactReviewMode` → **Turbo**
-
-## Advanced settings
-
-Most users won't need to change these. All settings are under 
-`ag-auto-accept.*`:
+---
 
 <details>
-<summary>Click to expand settings</summary>
+<summary>Advanced</summary>
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| enabled | true | Global on/off |
-| fastIntervalMs | 200 | Fast polling interval |
-| slowIntervalMs | 2000 | Slow polling interval |
-| heartbeatIntervalMs | 3000 | Background heartbeat interval |
-| fastDurationMs | 10000 | Duration before slowing down |
-| cooldownDurationMs | 30000 | Duration before going idle |
-| enableTerminalAccept | true | Auto-accept terminal commands |
-| enableAgentStepAccept | true | Auto-accept agent steps |
-| enableEditorAccept | true | Auto-accept code edits |
+**Toggle:** Ctrl+Alt+Shift+A · **Force accept:** Ctrl+Alt+Shift+Y
+
+All settings under `ag-auto-accept.*` in settings.json. 
+Everything works out of the box — no configuration needed.
 
 </details>
 
-## Known limitations
-
-- Auto-accept pauses when minimized (see Background Mode above)
-- Agent Manager must have the main IDE window open
-- "Allow file access" prompts can't be automated — set 
-  `allowAgentAccessNonWorkspaceFiles` to true in Antigravity settings
-
-## License
-
-MIT
+[Report an issue](https://github.com/mrkeles61/YoloMode/issues) · MIT License
