@@ -5,6 +5,24 @@
 Install it, forget it. Agent steps, terminal commands, code edits — 
 all accepted automatically.
 
+## Background mode (optional)
+
+By default, auto-accept pauses when the IDE is minimized. It catches 
+up instantly when you restore the window.
+
+To keep it running while minimized, add these to your `argv.json` 
+(`%USERPROFILE%\.antigravity\argv.json` on Windows, 
+`~/.antigravity/argv.json` on Mac/Linux):
+```json
+{
+  "disable-background-timer-throttling": true,
+  "disable-backgrounding-occluded-windows": true,
+  "disable-renderer-backgrounding": true
+}
+```
+
+Restart the IDE after saving.
+
 ## Install
 
 1. Open Antigravity → Extensions (Ctrl+Shift+X)
@@ -34,24 +52,6 @@ For full hands-free mode, also set these in Antigravity Settings:
 - `cascadeAutoExecutionPolicy` → **Turbo**
 - `browserJsExecutionPolicy` → **Turbo**  
 - `artifactReviewMode` → **Turbo**
-
-## Background mode (optional)
-
-By default, auto-accept pauses when the IDE is minimized. It catches 
-up instantly when you restore the window.
-
-To keep it running while minimized, add these to your `argv.json` 
-(`%USERPROFILE%\.antigravity\argv.json` on Windows, 
-`~/.antigravity/argv.json` on Mac/Linux):
-```json
-{
-  "disable-background-timer-throttling": true,
-  "disable-backgrounding-occluded-windows": true,
-  "disable-renderer-backgrounding": true
-}
-```
-
-Restart the IDE after saving.
 
 ## Advanced settings
 
