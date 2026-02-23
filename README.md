@@ -85,13 +85,33 @@ For the best hands-free experience alongside YoloMode, set these in Antigravity 
 | `browserJsExecutionPolicy` | Turbo | Auto-approve browser script execution |
 | `artifactReviewMode` | Turbo | Auto-approve artifact reviews |
 
+## Background Mode
+
+By default, Antigravity (like all Electron apps) throttles background windows, which can prevent auto-accepts when the IDE is minimized or behind other windows.
+
+To enable background mode, add these Chromium flags to your `argv.json`:
+- Windows: `%USERPROFILE%\.antigravity\argv.json`
+- macOS/Linux: `~/.antigravity/argv.json`
+
+```json
+{
+    "disable-background-timer-throttling": true,
+    "disable-backgrounding-occluded-windows": true,
+    "disable-renderer-backgrounding": true
+}
+```
+
+Restart the IDE after saving. YoloMode will then continue accepting even when the window is minimized.
+
 ## Known Limitations
 
-1. **Agent Manager standalone** — The extension requires the main Antigravity IDE window to be open. If you open Agent Manager without the IDE, extensions don't load. This is an Antigravity platform limitation. Workaround: open the IDE first.
+1. **Minimized window** — Auto-accept pauses when the IDE is minimized. YoloMode catches up instantly when you restore the window. For background mode support, see the [Background Mode](#background-mode) section above.
 
-2. **Browser script permissions** — Browser JS execution prompts are controlled by Antigravity's built-in `browserJsExecutionPolicy` setting, not by this extension. Set it to Turbo in Settings → Agent.
+2. **Agent Manager standalone** — The extension requires the main Antigravity IDE window to be open. If you open Agent Manager without the IDE, extensions don't load. This is an Antigravity platform limitation. Workaround: open the IDE first.
 
-3. **"Allow file access" prompts** — The "Allow Once" / "Allow This Conversation" prompts in new conversations are webview-internal and cannot be automated by any extension. Workaround: set `allowAgentAccessNonWorkspaceFiles` to `true` in Antigravity settings.
+3. **Browser script permissions** — Browser JS execution prompts are controlled by Antigravity's built-in `browserJsExecutionPolicy` setting, not by this extension. Set it to Turbo in Settings → Agent.
+
+4. **"Allow file access" prompts** — The "Allow Once" / "Allow This Conversation" prompts in new conversations are webview-internal and cannot be automated by any extension. Workaround: set `allowAgentAccessNonWorkspaceFiles` to `true` in Antigravity settings.
 
 ## Contributing
 

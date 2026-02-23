@@ -3,7 +3,7 @@
     "publisher": "mrkeles61",
     "displayName": "YoloMode \u2014 Auto Accept for Antigravity",
     "description": "Auto-accept agent steps, terminal commands, and code edits in Google Antigravity IDE. Hands-free YOLO mode for agentic development. Stop clicking Accept and let the AI work.",
-    "version": "2.0.0",
+    "version": "2.3.0",
     "icon": "icon.png",
     "license": "MIT",
     "repository": {
@@ -62,11 +62,13 @@
         "keybindings": [
             {
                 "command": "ag-auto-accept.toggle",
-                "key": "ctrl+alt+shift+a"
+                "key": "ctrl+alt+shift+a",
+                "mac": "cmd+alt+shift+a"
             },
             {
                 "command": "ag-auto-accept.forceAccept",
-                "key": "ctrl+alt+shift+y"
+                "key": "ctrl+alt+shift+y",
+                "mac": "cmd+alt+shift+y"
             }
         ],
         "configuration": {
