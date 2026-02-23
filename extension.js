@@ -1,7 +1,7 @@
 const vscode = require('vscode');
 
 // ============================================================
-// YoloMode v2.5.0 -- Auto-accept for Antigravity
+// YoloMode v2.5.1 -- Auto-accept for Antigravity
 // Works in: Editor, Terminal, Agent Manager (standalone)
 // Architecture: Event-driven three-state (IDLE/FAST/SLOW) + heartbeat
 // ============================================================
@@ -284,7 +284,7 @@ function startSleepDetection() {
 // --- Activation ---
 function activate(context) {
     outputChannel = vscode.window.createOutputChannel('YoloMode');
-    log('=== YoloMode v2.5.0 activated ===');
+    log('=== YoloMode v2.5.1 activated ===');
     log(`Time: ${new Date().toLocaleString()}`);
 
     // Status bar

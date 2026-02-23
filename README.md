@@ -13,6 +13,19 @@ terminal commands, code edits. Install it and never think about it again.
 
 That's it. YoloMode is already running.
 
+## First launch
+
+When Antigravity starts, it may open a default chat that isn't your 
+working conversation. Before YoloMode can accept for you:
+
+1. Open the chat sidebar in the IDE
+2. Switch to the conversation you're working in
+3. YoloMode now targets that conversation
+
+You only need to do this once per session. After switching, you can 
+use Agent Manager, minimize the IDE, or work in other apps — YoloMode 
+stays locked to your active conversation.
+
 ## Works best with
 
 Set these in Antigravity Settings for a fully autonomous workflow:
@@ -27,7 +40,7 @@ Set these in Antigravity Settings for a fully autonomous workflow:
 
 Add these to `argv.json` to keep YoloMode active even when minimized:
 
-**Windows:** `%USERPROFILE%\.antigravity\argv.json`
+**Windows:** `%USERPROFILE%\.antigravity\argv.json`  
 **Mac/Linux:** `~/.antigravity/argv.json`
 ```json
 {
@@ -39,15 +52,18 @@ Add these to `argv.json` to keep YoloMode active even when minimized:
 
 Restart the IDE after saving.
 
----
-
 <details>
 <summary>Advanced</summary>
 
 **Toggle:** Ctrl+Alt+Shift+A · **Force accept:** Ctrl+Alt+Shift+Y
 
-All settings under `ag-auto-accept.*` in settings.json. 
+All settings under `ag-auto-accept.*` in settings.json.
 Everything works out of the box — no configuration needed.
+
+**One conversation at a time.** YoloMode accepts on whichever 
+conversation is active in the IDE sidebar. To switch, click 
+the conversation in the sidebar. Multi-conversation support is 
+a known Antigravity platform limitation.
 
 </details>
 
