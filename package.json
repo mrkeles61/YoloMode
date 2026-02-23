@@ -1,0 +1,136 @@
+{
+    "name": "yolomode",
+    "publisher": "mrkeles61",
+    "displayName": "YoloMode \u2014 Auto Accept for Antigravity",
+    "description": "Auto-accept agent steps, terminal commands, and code edits in Google Antigravity IDE. Hands-free YOLO mode for agentic development. Stop clicking Accept and let the AI work.",
+    "version": "2.0.0",
+    "icon": "icon.png",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/erenk/yolomode"
+    },
+    "bugs": {
+        "url": "https://github.com/erenk/yolomode/issues"
+    },
+    "categories": [
+        "Other",
+        "Machine Learning"
+    ],
+    "keywords": [
+        "antigravity",
+        "google antigravity",
+        "auto accept",
+        "auto-accept",
+        "auto accept antigravity",
+        "yolo",
+        "yolo mode",
+        "agent",
+        "agent manager",
+        "auto approve",
+        "auto run",
+        "hands-free",
+        "automation",
+        "accept all",
+        "turbo mode",
+        "agentic",
+        "cursor auto accept",
+        "windsurf auto accept"
+    ],
+    "engines": {
+        "vscode": "^1.90.0"
+    },
+    "activationEvents": [
+        "*"
+    ],
+    "main": "./extension.js",
+    "contributes": {
+        "commands": [
+            {
+                "command": "ag-auto-accept.toggle",
+                "title": "YoloMode: Toggle"
+            },
+            {
+                "command": "ag-auto-accept.forceAccept",
+                "title": "YoloMode: Force Accept Now"
+            },
+            {
+                "command": "ag-auto-accept.showLog",
+                "title": "YoloMode: Show Log"
+            }
+        ],
+        "keybindings": [
+            {
+                "command": "ag-auto-accept.toggle",
+                "key": "ctrl+alt+shift+a"
+            },
+            {
+                "command": "ag-auto-accept.forceAccept",
+                "key": "ctrl+alt+shift+y"
+            }
+        ],
+        "configuration": {
+            "title": "YoloMode",
+            "properties": {
+                "ag-auto-accept.enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable or disable auto-accept globally."
+                },
+                "ag-auto-accept.fastIntervalMs": {
+                    "type": "number",
+                    "default": 200,
+                    "description": "Polling interval (ms) when agent activity is detected."
+                },
+                "ag-auto-accept.slowIntervalMs": {
+                    "type": "number",
+                    "default": 2000,
+                    "description": "Polling interval (ms) during cooldown."
+                },
+                "ag-auto-accept.heartbeatIntervalMs": {
+                    "type": "number",
+                    "default": 3000,
+                    "description": "Baseline polling interval (ms) that always runs, even when idle. This ensures Agent Manager steps are caught even when no editor events fire. Set to 0 to disable."
+                },
+                "ag-auto-accept.fastDurationMs": {
+                    "type": "number",
+                    "default": 10000,
+                    "description": "How long (ms) to fast-poll after activity is detected."
+                },
+                "ag-auto-accept.cooldownDurationMs": {
+                    "type": "number",
+                    "default": 30000,
+                    "description": "How long (ms) to slow-poll before going idle."
+                },
+                "ag-auto-accept.enableTerminalAccept": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Auto-accept terminal run commands."
+                },
+                "ag-auto-accept.enableAgentStepAccept": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Auto-accept agent panel steps (Agent Manager)."
+                },
+                "ag-auto-accept.enableEditorAccept": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Auto-accept editor code edits and diff hunks."
+                },
+                "ag-auto-accept.bannedPatterns": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [
+                        "rm -rf /",
+                        "format c:",
+                        "DROP TABLE",
+                        "shutdown"
+                    ],
+                    "description": "Command patterns to never auto-accept (reserved for future use)."
+                }
+            }
+        }
+    }
+}

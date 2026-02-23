@@ -1,0 +1,7 @@
+.git/**
+.github/**
+node_modules/**
+*.md
+!README.md
+.gitignore
+package-lock.json
