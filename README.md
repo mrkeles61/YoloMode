@@ -13,6 +13,19 @@ terminal commands, code edits. Install it and never think about it again.
 
 That's it. YoloMode is already running.
 
+## CDP mode (v3)
+
+YoloMode v3 uses **Chrome DevTools Protocol** to accept agent steps 
+directly in the side panel — no more missed accepts.
+
+**First-time setup is automatic:**
+1. On first activation, YoloMode adds `remote-debugging-port` to your `argv.json`
+2. You'll see a one-time "Restart Now" notification
+3. After restart, CDP is active — zero configuration needed
+
+To disable CDP mode: set `ag-auto-accept.enableCDP` to `false` in settings.
+To change the port: set `ag-auto-accept.cdpPort` (default: `9222`).
+
 ## First launch
 
 When Antigravity starts, it may open a default chat that isn't your 

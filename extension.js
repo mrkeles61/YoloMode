@@ -1,9 +1,15 @@
 const vscode = require('vscode');
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const WebSocket = require('ws');
 
 // ============================================================
-// YoloMode v2.5.1 -- Auto-accept for Antigravity
+// YoloMode v3.0.0 -- Auto-accept for Antigravity
 // Works in: Editor, Terminal, Agent Manager (standalone)
 // Architecture: Event-driven three-state (IDLE/FAST/SLOW) + heartbeat
+//               + CDP fallback for agentSidePanel accept
 // ============================================================
 
 const State = { IDLE: 'IDLE', FAST: 'FAST', SLOW: 'SLOW' };
@@ -25,7 +31,15 @@ let lastTickTime = Date.now();    // sleep/lock detection
 let sleepCheckInterval;           // drift check timer
 let isAccepting = false;          // re-entrancy guard
 
-// Accept commands
+// CDP state
+let cdpWs = null;
+let cdpReady = false;
+let cdpMessageId = 1;
+let cdpPendingCallbacks = {};
+let cdpReconnectTimer = null;
+let cdpSetupDone = false;
+
+// Accept commands (VS Code API path)
 const ACCEPT_COMMANDS = [
     'antigravity.agent.acceptAgentStep',
     'antigravity.terminalCommand.accept',
@@ -51,12 +65,300 @@ function log(msg) {
     logLineCount++;
 }
 
-// --- Core accept logic: fire-and-forget ---
+// ============================================================
+// argv.json auto-configuration
+// ============================================================
+
+function getArgvJsonPath() {
+    const home = os.homedir();
+    // Try .antigravity first, fall back to .vscode
+    const antigravityPath = path.join(home, '.antigravity', 'argv.json');
+    const vscodePath = path.join(home, '.vscode', 'argv.json');
+    if (fs.existsSync(antigravityPath)) return antigravityPath;
+    if (fs.existsSync(vscodePath)) return vscodePath;
+    // Default to .antigravity
+    return antigravityPath;
+}
+
+function stripJsonComments(text) {
+    // Remove single-line // comments (not inside strings)
+    let result = '';
+    let inString = false;
+    let escape = false;
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (escape) {
+            result += ch;
+            escape = false;
+            continue;
+        }
+        if (ch === '\\' && inString) {
+            result += ch;
+            escape = true;
+            continue;
+        }
+        if (ch === '"') {
+            inString = !inString;
+            result += ch;
+            continue;
+        }
+        if (!inString && ch === '/' && text[i + 1] === '/') {
+            // Skip to end of line
+            while (i < text.length && text[i] !== '\n') i++;
+            result += '\n';
+            continue;
+        }
+        result += ch;
+    }
+    return result;
+}
+
+async function ensureDebugPort() {
+    const port = cfg('cdpPort');
+    const argvPath = getArgvJsonPath();
+
+    try {
+        let content = '';
+        let data = {};
+
+        if (fs.existsSync(argvPath)) {
+            content = fs.readFileSync(argvPath, 'utf8');
+            data = JSON.parse(stripJsonComments(content));
+        }
+
+        if (data['remote-debugging-port']) {
+            log(`[${new Date().toLocaleTimeString()}] CDP: debug port already configured (${data['remote-debugging-port']}) in ${argvPath}`);
+            return data['remote-debugging-port'];
+        }
+
+        // Add the flag
+        data['remote-debugging-port'] = port;
+
+        // Ensure directory exists
+        const dir = path.dirname(argvPath);
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+
+        fs.writeFileSync(argvPath, JSON.stringify(data, null, 2), 'utf8');
+        log(`[${new Date().toLocaleTimeString()}] CDP: Added remote-debugging-port=${port} to ${argvPath}`);
+
+        const action = await vscode.window.showInformationMessage(
+            'YoloMode: CDP auto-accept configured. Restart the IDE for full agent step acceptance.',
+            'Restart Now',
+            'Later'
+        );
+
+        if (action === 'Restart Now') {
+            vscode.commands.executeCommand('workbench.action.reloadWindow');
+        }
+
+        return null; // Port not active yet until restart
+    } catch (err) {
+        log(`[${new Date().toLocaleTimeString()}] CDP: Failed to configure argv.json: ${err.message}`);
+        return null;
+    }
+}
+
+// ============================================================
+// CDP Connection Layer
+// ============================================================
+
+function cdpGetTargets(port) {
+    return new Promise((resolve, reject) => {
+        const req = http.get(`http://127.0.0.1:${port}/json`, (res) => {
+            let body = '';
+            res.on('data', chunk => body += chunk);
+            res.on('end', () => {
+                try {
+                    resolve(JSON.parse(body));
+                } catch (e) {
+                    reject(new Error('Failed to parse CDP targets'));
+                }
+            });
+        });
+        req.on('error', reject);
+        req.setTimeout(3000, () => {
+            req.destroy();
+            reject(new Error('CDP target discovery timed out'));
+        });
+    });
+}
+
+function cdpSend(method, params) {
+    return new Promise((resolve, reject) => {
+        if (!cdpWs || cdpWs.readyState !== WebSocket.OPEN) {
+            return reject(new Error('CDP not connected'));
+        }
+        const id = cdpMessageId++;
+        const msg = JSON.stringify({ id, method, params });
+        cdpPendingCallbacks[id] = { resolve, reject };
+        cdpWs.send(msg);
+
+        // Timeout
+        setTimeout(() => {
+            if (cdpPendingCallbacks[id]) {
+                delete cdpPendingCallbacks[id];
+                reject(new Error(`CDP call ${method} timed out`));
+            }
+        }, 5000);
+    });
+}
+
+async function cdpConnect(port) {
+    if (cdpWs && cdpWs.readyState === WebSocket.OPEN) return;
+
+    try {
+        const targets = await cdpGetTargets(port);
+        // Find the main window target (type: "page")
+        const target = targets.find(t =>
+            t.type === 'page' && t.webSocketDebuggerUrl
+        );
+        if (!target) {
+            log(`[${new Date().toLocaleTimeString()}] CDP: No suitable target found among ${targets.length} targets`);
+            return;
+        }
+
+        log(`[${new Date().toLocaleTimeString()}] CDP: Connecting to ${target.title || target.url}`);
+
+        cdpWs = new WebSocket(target.webSocketDebuggerUrl);
+
+        cdpWs.on('open', () => {
+            cdpReady = true;
+            log(`[${new Date().toLocaleTimeString()}] CDP: Connected`);
+        });
+
+        cdpWs.on('message', (data) => {
+            try {
+                const msg = JSON.parse(data.toString());
+                if (msg.id && cdpPendingCallbacks[msg.id]) {
+                    const cb = cdpPendingCallbacks[msg.id];
+                    delete cdpPendingCallbacks[msg.id];
+                    if (msg.error) {
+                        cb.reject(new Error(msg.error.message));
+                    } else {
+                        cb.resolve(msg.result);
+                    }
+                }
+            } catch (_) { }
+        });
+
+        cdpWs.on('close', () => {
+            cdpReady = false;
+            cdpWs = null;
+            cdpPendingCallbacks = {};
+            log(`[${new Date().toLocaleTimeString()}] CDP: Disconnected`);
+            scheduleCdpReconnect(port);
+        });
+
+        cdpWs.on('error', (err) => {
+            log(`[${new Date().toLocaleTimeString()}] CDP: WebSocket error: ${err.message}`);
+        });
+
+    } catch (err) {
+        log(`[${new Date().toLocaleTimeString()}] CDP: Connection failed: ${err.message}`);
+        scheduleCdpReconnect(port);
+    }
+}
+
+function scheduleCdpReconnect(port) {
+    if (cdpReconnectTimer) return;
+    cdpReconnectTimer = setTimeout(() => {
+        cdpReconnectTimer = null;
+        if (enabled && cfg('enableCDP')) {
+            cdpConnect(port);
+        }
+    }, 10000);
+}
+
+function cdpDisconnect() {
+    if (cdpReconnectTimer) {
+        clearTimeout(cdpReconnectTimer);
+        cdpReconnectTimer = null;
+    }
+    if (cdpWs) {
+        cdpReady = false;
+        cdpWs.close();
+        cdpWs = null;
+    }
+    cdpPendingCallbacks = {};
+}
+
+// ============================================================
+// CDP Accept Logic — click accept buttons in the DOM
+// ============================================================
+
+async function tryAcceptViaCDP() {
+    if (!cdpReady || !cfg('enableCDP')) return;
+
+    try {
+        // Use the persistent CDP connection (cdpWs) to evaluate in the main page.
+        // We use Page.getFrameTree + Runtime on specific contexts to reach webviews.
+        // This avoids opening new WebSocket connections per poll which causes
+        // the webview frame to activate and trigger scroll-into-view.
+
+        // The accept script — minimal DOM interaction, no scrolling, no focus changes.
+        // Uses element.click() which dispatches a click event without scrolling.
+        // No getBoundingClientRect, no scrollIntoView, no focus, no coordinate math.
+        const script = `
+            (function() {
+                let clicked = 0;
+                try {
+                    const buttons = document.querySelectorAll('button');
+                    for (const btn of buttons) {
+                        const text = (btn.textContent || '').trim().toLowerCase();
+
+                        // Strict exact-match only
+                        if (
+                            text !== 'run' &&
+                            text !== 'accept' &&
+                            text !== 'approve' &&
+                            text !== 'continue' &&
+                            text !== 'run command' &&
+                            text !== 'accept all' &&
+                            text !== 'yes' &&
+                            text !== 'allow'
+                        ) continue;
+
+                        // Must be rendered (not display:none or detached)
+                        if (btn.offsetParent === null) continue;
+
+                        // Click without any scrolling or focus changes
+                        btn.click();
+                        clicked++;
+                    }
+                } catch (e) { }
+                return clicked;
+            })()
+        `;
+
+        // Execute on the persistent main-page connection
+        // This does NOT open new connections or activate frames
+        const result = await cdpSend('Runtime.evaluate', {
+            expression: script,
+            returnByValue: true,
+        });
+
+        if (result && result.result && result.result.value > 0) {
+            log(`[${new Date().toLocaleTimeString()}] CDP: Clicked ${result.result.value} accept button(s)`);
+        }
+    } catch (err) {
+        // Silently fail — CDP is best-effort
+    }
+}
+
+
+
+// ============================================================
+// Core accept logic: VS Code API + CDP fallback
+// ============================================================
+
 async function tryAcceptAll() {
     if (!enabled || isAccepting) return;
     isAccepting = true;
 
     try {
+        // Path 1: VS Code API commands (works for terminal, editor, and legacy agent accept)
         for (const cmdId of ACCEPT_COMMANDS) {
             try {
                 await vscode.commands.executeCommand(cmdId);
@@ -64,6 +366,9 @@ async function tryAcceptAll() {
                 // Command not available or failed — ignore
             }
         }
+
+        // Path 2: CDP fallback (clicks accept buttons in the agentSidePanel DOM)
+        await tryAcceptViaCDP();
     } catch (err) {
         log(`[${new Date().toLocaleTimeString()}] ERROR in tryAcceptAll: ${err.message}`);
     } finally {
@@ -143,7 +448,8 @@ function updateStatusBar(text, bgColor) {
     statusBarItem.backgroundColor = bgColor
         ? new vscode.ThemeColor(bgColor)
         : undefined;
-    statusBarItem.tooltip = `YoloMode — ${currentState} | Click to toggle`;
+    const cdpStatus = cdpReady ? 'CDP ✓' : 'CDP ✗';
+    statusBarItem.tooltip = `YoloMode — ${currentState} | ${cdpStatus} | Click to toggle`;
     statusBarItem.show();
 }
 
@@ -284,7 +590,7 @@ function startSleepDetection() {
 // --- Activation ---
 function activate(context) {
     outputChannel = vscode.window.createOutputChannel('YoloMode');
-    log('=== YoloMode v2.5.1 activated ===');
+    log('=== YoloMode v3.0.2 activated ===');
     log(`Time: ${new Date().toLocaleString()}`);
 
     // Status bar
@@ -306,6 +612,7 @@ function activate(context) {
                 log(`[${new Date().toLocaleTimeString()}] === DISABLED ===`);
                 clearAllTimers();
                 disposeEventListeners();
+                cdpDisconnect();
                 currentState = State.IDLE;
                 updateStatusBar('$(x) YOLO', undefined);
                 vscode.window.showInformationMessage('YoloMode: OFF');
@@ -342,6 +649,17 @@ function activate(context) {
             transitionTo(State.FAST, 'activate');
         }, 3000);
         updateStatusBar('$(clock) YOLO', undefined);
+
+        // CDP setup: ensure debug port is configured, then connect
+        if (cfg('enableCDP')) {
+            ensureDebugPort().then(port => {
+                if (port) {
+                    cdpConnect(port);
+                } else {
+                    log(`[${new Date().toLocaleTimeString()}] CDP: Debug port not active yet (restart required)`);
+                }
+            });
+        }
     } else {
         updateStatusBar('$(x) YOLO', undefined);
     }
@@ -350,6 +668,7 @@ function activate(context) {
 function deactivate() {
     clearAllTimers();
     disposeEventListeners();
+    cdpDisconnect();
     if (outputChannel) outputChannel.dispose();
 }
 

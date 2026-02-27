@@ -1,17 +1,17 @@
 {
     "name": "yolomode",
     "publisher": "mrkeles61",
-    "displayName": "YoloMode \u2014 Auto Accept for Antigravity",
+    "displayName": "YoloMode — Auto Accept for Antigravity",
     "description": "Auto-accept agent steps, terminal commands, and code edits in Google Antigravity IDE. Hands-free YOLO mode for agentic development. Stop clicking Accept and let the AI work.",
-    "version": "2.5.1",
+    "version": "3.0.2",
     "icon": "icon.png",
     "license": "MIT",
     "repository": {
         "type": "git",
-        "url": "https://github.com/erenk/yolomode"
+        "url": "https://github.com/mrkeles61/YoloMode"
     },
     "bugs": {
-        "url": "https://github.com/erenk/yolomode/issues"
+        "url": "https://github.com/mrkeles61/YoloMode/issues"
     },
     "categories": [
         "Other",
@@ -131,8 +131,21 @@
                         "shutdown"
                     ],
                     "description": "Command patterns to never auto-accept (reserved for future use)."
+                },
+                "ag-auto-accept.enableCDP": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable CDP (Chrome DevTools Protocol) mode for accepting agent steps in the side panel. Requires a one-time IDE restart on first use."
+                },
+                "ag-auto-accept.cdpPort": {
+                    "type": "number",
+                    "default": 9222,
+                    "description": "Port for the Chrome DevTools Protocol debug connection."
                 }
             }
         }
+    },
+    "dependencies": {
+        "ws": "^8.19.0"
     }
 }
