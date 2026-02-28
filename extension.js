@@ -31,14 +31,6 @@ let lastTickTime = Date.now();    // sleep/lock detection
 let sleepCheckInterval;           // drift check timer
 let isAccepting = false;          // re-entrancy guard
 
-// CDP state
-let cdpWs = null;
-let cdpReady = false;
-let cdpMessageId = 1;
-let cdpPendingCallbacks = {};
-let cdpReconnectTimer = null;
-let cdpSetupDone = false;
-
 // Accept commands (VS Code API path)
 const ACCEPT_COMMANDS = [
     'antigravity.agent.acceptAgentStep',
@@ -71,17 +63,14 @@ function log(msg) {
 
 function getArgvJsonPath() {
     const home = os.homedir();
-    // Try .antigravity first, fall back to .vscode
     const antigravityPath = path.join(home, '.antigravity', 'argv.json');
     const vscodePath = path.join(home, '.vscode', 'argv.json');
     if (fs.existsSync(antigravityPath)) return antigravityPath;
     if (fs.existsSync(vscodePath)) return vscodePath;
-    // Default to .antigravity
     return antigravityPath;
 }
 
 function stripJsonComments(text) {
-    // Remove single-line // comments (not inside strings)
     let result = '';
     let inString = false;
     let escape = false;
@@ -103,65 +92,114 @@ function stripJsonComments(text) {
             continue;
         }
         if (!inString && ch === '/' && text[i + 1] === '/') {
-            // Skip to end of line
             while (i < text.length && text[i] !== '\n') i++;
             result += '\n';
             continue;
         }
         result += ch;
     }
+    result = result.replace(/,(\s*[}\]])/g, '$1');
     return result;
 }
 
+function isPortInUse(port) {
+    return new Promise((resolve) => {
+        const net = require('net');
+        const server = net.createServer();
+        server.once('error', () => resolve(true));
+        server.once('listening', () => { server.close(); resolve(false); });
+        server.listen(port, '127.0.0.1');
+    });
+}
+
+async function findAvailablePort(startPort) {
+    for (let port = startPort; port <= startPort + 6; port++) {
+        const inUse = await isPortInUse(port);
+        if (!inUse) {
+            log(`[${new Date().toLocaleTimeString()}] CDP: Port ${port} is available`);
+            return port;
+        }
+        log(`[${new Date().toLocaleTimeString()}] CDP: Port ${port} is in use, trying next`);
+    }
+    return startPort;
+}
+
+function insertPortIntoArgv(rawContent, port) {
+    const lastBrace = rawContent.lastIndexOf('}');
+    if (lastBrace === -1) {
+        return `{\n    "remote-debugging-port": ${port}\n}\n`;
+    }
+    const before = rawContent.substring(0, lastBrace).trimEnd();
+    const after = rawContent.substring(lastBrace);
+    const needsComma = /["\d\w\]}\-]/.test(before[before.length - 1]);
+    return before + (needsComma ? ',' : '') + `\n    "remote-debugging-port": ${port}\n` + after;
+}
+
+function updatePortInArgv(rawContent, newPort) {
+    return rawContent.replace(
+        /("remote-debugging-port"\s*:\s*)\d+/,
+        `$1${newPort}`
+    );
+}
+
 async function ensureDebugPort() {
-    const port = cfg('cdpPort');
+    const preferredPort = cfg('cdpPort');
     const argvPath = getArgvJsonPath();
 
     try {
-        let content = '';
+        let rawContent = '';
         let data = {};
 
         if (fs.existsSync(argvPath)) {
-            content = fs.readFileSync(argvPath, 'utf8');
-            data = JSON.parse(stripJsonComments(content));
+            rawContent = fs.readFileSync(argvPath, 'utf8');
+            data = JSON.parse(stripJsonComments(rawContent));
         }
 
         if (data['remote-debugging-port']) {
-            log(`[${new Date().toLocaleTimeString()}] CDP: debug port already configured (${data['remote-debugging-port']}) in ${argvPath}`);
-            return data['remote-debugging-port'];
+            const existingPort = data['remote-debugging-port'];
+            log(`[${new Date().toLocaleTimeString()}] CDP: debug port configured (${existingPort}) in ${argvPath}`);
+            return existingPort;
         }
 
-        // Add the flag
-        data['remote-debugging-port'] = port;
+        const port = await findAvailablePort(preferredPort);
 
-        // Ensure directory exists
         const dir = path.dirname(argvPath);
         if (!fs.existsSync(dir)) {
             fs.mkdirSync(dir, { recursive: true });
         }
 
-        fs.writeFileSync(argvPath, JSON.stringify(data, null, 2), 'utf8');
+        if (rawContent) {
+            const updated = insertPortIntoArgv(rawContent, port);
+            fs.writeFileSync(argvPath, updated, 'utf8');
+        } else {
+            fs.writeFileSync(argvPath, `{\n    "remote-debugging-port": ${port}\n}\n`, 'utf8');
+        }
         log(`[${new Date().toLocaleTimeString()}] CDP: Added remote-debugging-port=${port} to ${argvPath}`);
 
-        const action = await vscode.window.showInformationMessage(
-            'YoloMode: CDP auto-accept configured. Restart the IDE for full agent step acceptance.',
+        const action = await vscode.window.showWarningMessage(
+            'YoloMode: Debug port configured. Please restart Antigravity completely (close all windows) for auto-accept to work.',
             'Restart Now',
             'Later'
         );
 
         if (action === 'Restart Now') {
-            vscode.commands.executeCommand('workbench.action.reloadWindow');
+            vscode.commands.executeCommand('workbench.action.quit');
         }
 
-        return null; // Port not active yet until restart
+        return null;
     } catch (err) {
         log(`[${new Date().toLocaleTimeString()}] CDP: Failed to configure argv.json: ${err.message}`);
         return null;
     }
 }
 
+// CDP state — persistent per-target WebSocket pool
+let cdpTargetPool = new Map(); // Map<targetId, { ws, title, type, msgId, callbacks, isWebview, observerInjected }>
+let cdpDiscoveryTimer = null;
+let cdpPort = null;
+
 // ============================================================
-// CDP Connection Layer
+// CDP Connection Layer — per-target persistent WebSockets
 // ============================================================
 
 function cdpGetTargets(port) {
@@ -185,165 +223,188 @@ function cdpGetTargets(port) {
     });
 }
 
-function cdpSend(method, params) {
+function cdpSendTo(entry, method, params) {
     return new Promise((resolve, reject) => {
-        if (!cdpWs || cdpWs.readyState !== WebSocket.OPEN) {
-            return reject(new Error('CDP not connected'));
+        if (!entry.ws || entry.ws.readyState !== WebSocket.OPEN) {
+            return reject(new Error('Not connected'));
         }
-        const id = cdpMessageId++;
+        const id = entry.msgId++;
         const msg = JSON.stringify({ id, method, params });
-        cdpPendingCallbacks[id] = { resolve, reject };
-        cdpWs.send(msg);
+        entry.callbacks[id] = { resolve, reject };
+        entry.ws.send(msg);
 
-        // Timeout
         setTimeout(() => {
-            if (cdpPendingCallbacks[id]) {
-                delete cdpPendingCallbacks[id];
+            if (entry.callbacks[id]) {
+                delete entry.callbacks[id];
                 reject(new Error(`CDP call ${method} timed out`));
             }
         }, 5000);
     });
 }
 
-async function cdpConnect(port) {
-    if (cdpWs && cdpWs.readyState === WebSocket.OPEN) return;
+function cdpConnectTarget(target) {
+    const targetId = target.id;
+    if (cdpTargetPool.has(targetId)) return;
+
+    const title = target.title || target.url || targetId;
+    const entry = {
+        ws: null,
+        title,
+        type: target.type,
+        msgId: 1,
+        callbacks: {},
+        isWebview: null,       // null = unchecked, true/false = cached
+        observerInjected: false,
+    };
+
+    try {
+        entry.ws = new WebSocket(target.webSocketDebuggerUrl);
+    } catch (err) {
+        return;
+    }
+
+    entry.ws.on('open', () => {
+        log(`[${new Date().toLocaleTimeString()}] CDP: Connected to "${title}" (${target.type})`);
+    });
+
+    entry.ws.on('message', (data) => {
+        try {
+            const msg = JSON.parse(data.toString());
+            if (msg.id && entry.callbacks[msg.id]) {
+                const cb = entry.callbacks[msg.id];
+                delete entry.callbacks[msg.id];
+                if (msg.error) {
+                    cb.reject(new Error(msg.error.message));
+                } else {
+                    cb.resolve(msg.result);
+                }
+            }
+        } catch (_) { }
+    });
+
+    entry.ws.on('close', () => {
+        cdpTargetPool.delete(targetId);
+        log(`[${new Date().toLocaleTimeString()}] CDP: Target disconnected: "${title}"`);
+    });
+
+    entry.ws.on('error', () => {
+        // Will trigger close event
+    });
+
+    cdpTargetPool.set(targetId, entry);
+}
+
+async function cdpDiscoverAndConnect(port) {
+    if (!enabled || !cfg('enableCDP')) return;
 
     try {
         const targets = await cdpGetTargets(port);
-        // Find the main window target (type: "page")
-        const target = targets.find(t =>
-            t.type === 'page' && t.webSocketDebuggerUrl
-        );
-        if (!target) {
-            log(`[${new Date().toLocaleTimeString()}] CDP: No suitable target found among ${targets.length} targets`);
-            return;
+        const liveIds = new Set(targets.map(t => t.id));
+
+        // Clean up connections for targets that disappeared
+        for (const [id, entry] of cdpTargetPool) {
+            if (!liveIds.has(id)) {
+                if (entry.ws) { try { entry.ws.close(); } catch (_) { } }
+                cdpTargetPool.delete(id);
+            }
         }
 
-        log(`[${new Date().toLocaleTimeString()}] CDP: Connecting to ${target.title || target.url}`);
+        // Connect to new targets (skip workers with empty URLs)
+        let newCount = 0;
+        for (const target of targets) {
+            if (!target.webSocketDebuggerUrl) continue;
+            if (target.type === 'worker' || target.type === 'service_worker') continue;
+            if (cdpTargetPool.has(target.id)) continue;
 
-        cdpWs = new WebSocket(target.webSocketDebuggerUrl);
-
-        cdpWs.on('open', () => {
-            cdpReady = true;
-            log(`[${new Date().toLocaleTimeString()}] CDP: Connected`);
-        });
-
-        cdpWs.on('message', (data) => {
-            try {
-                const msg = JSON.parse(data.toString());
-                if (msg.id && cdpPendingCallbacks[msg.id]) {
-                    const cb = cdpPendingCallbacks[msg.id];
-                    delete cdpPendingCallbacks[msg.id];
-                    if (msg.error) {
-                        cb.reject(new Error(msg.error.message));
-                    } else {
-                        cb.resolve(msg.result);
-                    }
-                }
-            } catch (_) { }
-        });
-
-        cdpWs.on('close', () => {
-            cdpReady = false;
-            cdpWs = null;
-            cdpPendingCallbacks = {};
-            log(`[${new Date().toLocaleTimeString()}] CDP: Disconnected`);
-            scheduleCdpReconnect(port);
-        });
-
-        cdpWs.on('error', (err) => {
-            log(`[${new Date().toLocaleTimeString()}] CDP: WebSocket error: ${err.message}`);
-        });
-
+            cdpConnectTarget(target);
+            newCount++;
+        }
+        if (newCount > 0) {
+            log(`[${new Date().toLocaleTimeString()}] CDP: Discovered ${newCount} new target(s) (${cdpTargetPool.size} total)`);
+        }
+        // Always log target types for diagnostics
+        const types = targets.map(t => `${t.type}:${(t.title || t.url || '').substring(0, 30)}`);
+        log(`[${new Date().toLocaleTimeString()}] CDP TARGETS: ${targets.length} total [${types.join(', ')}]`);
     } catch (err) {
-        log(`[${new Date().toLocaleTimeString()}] CDP: Connection failed: ${err.message}`);
-        scheduleCdpReconnect(port);
+        // Silent — discovery will retry next cycle
     }
 }
 
-function scheduleCdpReconnect(port) {
-    if (cdpReconnectTimer) return;
-    cdpReconnectTimer = setTimeout(() => {
-        cdpReconnectTimer = null;
-        if (enabled && cfg('enableCDP')) {
-            cdpConnect(port);
-        }
-    }, 10000);
+function startCdpDiscovery(port) {
+    cdpPort = port;
+    cdpDiscoverAndConnect(port);
+    if (cdpDiscoveryTimer) clearInterval(cdpDiscoveryTimer);
+    cdpDiscoveryTimer = setInterval(() => cdpDiscoverAndConnect(port), 10000);
 }
 
 function cdpDisconnect() {
-    if (cdpReconnectTimer) {
-        clearTimeout(cdpReconnectTimer);
-        cdpReconnectTimer = null;
+    if (cdpDiscoveryTimer) {
+        clearInterval(cdpDiscoveryTimer);
+        cdpDiscoveryTimer = null;
     }
-    if (cdpWs) {
-        cdpReady = false;
-        cdpWs.close();
-        cdpWs = null;
+    for (const [id, entry] of cdpTargetPool) {
+        if (entry.ws) { try { entry.ws.close(); } catch (_) { } }
     }
-    cdpPendingCallbacks = {};
+    cdpTargetPool.clear();
+    // NOTE: do NOT clear cdpPort — it's needed for toggle-on reconnection
 }
 
 // ============================================================
-// CDP Accept Logic — click accept buttons in the DOM
+// CDP Accept Logic — dual approach: button click + Alt+Enter KeyboardEvent
 // ============================================================
 
-async function tryAcceptViaCDP() {
-    if (!cdpReady || !cfg('enableCDP')) return;
-
-    try {
-        // Use the persistent CDP connection (cdpWs) to evaluate in the main page.
-        // We use Page.getFrameTree + Runtime on specific contexts to reach webviews.
-        // This avoids opening new WebSocket connections per poll which causes
-        // the webview frame to activate and trigger scroll-into-view.
-
-        // The accept script — minimal DOM interaction, no scrolling, no focus changes.
-        // Uses element.click() which dispatches a click event without scrolling.
-        // No getBoundingClientRect, no scrollIntoView, no focus, no coordinate math.
-        const script = `
-            (function() {
-                let clicked = 0;
-                try {
-                    const buttons = document.querySelectorAll('button');
-                    for (const btn of buttons) {
-                        const text = (btn.textContent || '').trim().toLowerCase();
-
-                        // Strict exact-match only
-                        if (
-                            text !== 'run' &&
-                            text !== 'accept' &&
-                            text !== 'approve' &&
-                            text !== 'continue' &&
-                            text !== 'run command' &&
-                            text !== 'accept all' &&
-                            text !== 'yes' &&
-                            text !== 'allow'
-                        ) continue;
-
-                        // Must be rendered (not display:none or detached)
-                        if (btn.offsetParent === null) continue;
-
-                        // Click without any scrolling or focus changes
-                        btn.click();
-                        clicked++;
-                    }
-                } catch (e) { }
-                return clicked;
-            })()
-        `;
-
-        // Execute on the persistent main-page connection
-        // This does NOT open new connections or activate frames
-        const result = await cdpSend('Runtime.evaluate', {
-            expression: script,
-            returnByValue: true,
-        });
-
-        if (result && result.result && result.result.value > 0) {
-            log(`[${new Date().toLocaleTimeString()}] CDP: Clicked ${result.result.value} accept button(s)`);
+// NOTE: Antigravity buttons include keyboard shortcut text in textContent
+// e.g. "RunAlt+⌥↵" not just "Run". So we use startsWith matching, not exact match.
+const CDP_ACCEPT_SCRIPT = `
+    (function() {
+        var clicked = 0;
+        var buttons = document.querySelectorAll('button');
+        for (var i = 0; i < buttons.length; i++) {
+            var btn = buttons[i];
+            var text = (btn.textContent || '').trim();
+            if (!/^(Run|Accept|Accept All|Allow|Allow Once|Allow This Conversation|Yes)/i.test(text)) continue;
+            if (btn.offsetParent === null) continue;
+            if (btn.disabled) continue;
+            if (btn.dataset.yoloClicked && Date.now() - parseInt(btn.dataset.yoloClicked) < 5000) continue;
+            btn.dataset.yoloClicked = Date.now().toString();
+            btn.click();
+            clicked++;
         }
-    } catch (err) {
-        // Silently fail — CDP is best-effort
+        return clicked;
+    })()
+`;
+
+// Alt+Enter on #conversation — proven fallback for IDE side panel
+const ALT_ENTER_SCRIPT = `
+    (function() {
+        var conv = document.querySelector('#conversation');
+        if (!conv) return 0;
+        conv.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Enter', altKey: true, shiftKey: false,
+            bubbles: true, cancelable: true
+        }));
+        return 1;
+    })()
+`;
+
+async function tryAcceptViaCDP() {
+    if (cdpTargetPool.size === 0 || !cfg('enableCDP')) return;
+
+    for (const [id, entry] of cdpTargetPool) {
+        if (!entry.ws || entry.ws.readyState !== WebSocket.OPEN) continue;
+
+        // Method 1: Click matching buttons
+        try {
+            const result = await cdpSendTo(entry, 'Runtime.evaluate', {
+                expression: CDP_ACCEPT_SCRIPT,
+                returnByValue: true,
+            });
+            if (result && result.result && result.result.value > 0) {
+                log(`[${new Date().toLocaleTimeString()}] CDP: Clicked ${result.result.value} button(s) on "${entry.title.substring(0, 50)}"`);
+            }
+        } catch (_) {
+            // Target may have been destroyed — ignore
+        }
     }
 }
 
@@ -358,16 +419,7 @@ async function tryAcceptAll() {
     isAccepting = true;
 
     try {
-        // Path 1: VS Code API commands (works for terminal, editor, and legacy agent accept)
-        for (const cmdId of ACCEPT_COMMANDS) {
-            try {
-                await vscode.commands.executeCommand(cmdId);
-            } catch (_) {
-                // Command not available or failed — ignore
-            }
-        }
-
-        // Path 2: CDP fallback (clicks accept buttons in the agentSidePanel DOM)
+        // CDP: click accept buttons in webview DOMs
         await tryAcceptViaCDP();
     } catch (err) {
         log(`[${new Date().toLocaleTimeString()}] ERROR in tryAcceptAll: ${err.message}`);
@@ -448,7 +500,7 @@ function updateStatusBar(text, bgColor) {
     statusBarItem.backgroundColor = bgColor
         ? new vscode.ThemeColor(bgColor)
         : undefined;
-    const cdpStatus = cdpReady ? 'CDP ✓' : 'CDP ✗';
+    const cdpStatus = cdpTargetPool.size > 0 ? `CDP ✓ (${cdpTargetPool.size} targets)` : 'CDP ✗';
     statusBarItem.tooltip = `YoloMode — ${currentState} | ${cdpStatus} | Click to toggle`;
     statusBarItem.show();
 }
@@ -590,7 +642,7 @@ function startSleepDetection() {
 // --- Activation ---
 function activate(context) {
     outputChannel = vscode.window.createOutputChannel('YoloMode');
-    log('=== YoloMode v3.0.2 activated ===');
+    log('=== YoloMode v3.1.0 activated ===');
     log(`Time: ${new Date().toLocaleString()}`);
 
     // Status bar
@@ -607,9 +659,19 @@ function activate(context) {
                 registerEventListeners();
                 startHeartbeat();
                 transitionTo(State.FAST, 'toggle');
+                // Restart CDP discovery to reconnect and re-activate observers
+                if (cfg('enableCDP') && cdpPort) {
+                    startCdpDiscovery(cdpPort);
+                }
                 vscode.window.showInformationMessage('YoloMode: ON');
             } else {
                 log(`[${new Date().toLocaleTimeString()}] === DISABLED ===`);
+                // Deactivate observers in all targets before disconnecting
+                for (const [id, entry] of cdpTargetPool) {
+                    if (entry.ws && entry.ws.readyState === WebSocket.OPEN) {
+                        try { cdpSendTo(entry, 'Runtime.evaluate', { expression: 'window.__yolomode_active = false', returnByValue: true }); } catch (_) { }
+                    }
+                }
                 clearAllTimers();
                 disposeEventListeners();
                 cdpDisconnect();
@@ -654,7 +716,7 @@ function activate(context) {
         if (cfg('enableCDP')) {
             ensureDebugPort().then(port => {
                 if (port) {
-                    cdpConnect(port);
+                    startCdpDiscovery(port);
                 } else {
                     log(`[${new Date().toLocaleTimeString()}] CDP: Debug port not active yet (restart required)`);
                 }

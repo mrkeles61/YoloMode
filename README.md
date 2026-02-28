@@ -24,7 +24,7 @@ directly in the side panel — no more missed accepts.
 3. After restart, CDP is active — zero configuration needed
 
 To disable CDP mode: set `ag-auto-accept.enableCDP` to `false` in settings.
-To change the port: set `ag-auto-accept.cdpPort` (default: `9222`).
+To change the port: set `ag-auto-accept.cdpPort` (default: `9333`).
 
 ## First launch
 

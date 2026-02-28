@@ -3,7 +3,7 @@
     "publisher": "mrkeles61",
     "displayName": "YoloMode — Auto Accept for Antigravity",
     "description": "Auto-accept agent steps, terminal commands, and code edits in Google Antigravity IDE. Hands-free YOLO mode for agentic development. Stop clicking Accept and let the AI work.",
-    "version": "3.0.2",
+    "version": "3.1.0",
     "icon": "icon.png",
     "license": "MIT",
     "repository": {
@@ -139,7 +139,7 @@
                 },
                 "ag-auto-accept.cdpPort": {
                     "type": "number",
-                    "default": 9222,
+                    "default": 9333,
                     "description": "Port for the Chrome DevTools Protocol debug connection."
                 }
             }
