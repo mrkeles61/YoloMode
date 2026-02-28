@@ -6,10 +6,10 @@ const os = require('os');
 const WebSocket = require('ws');
 
 // ============================================================
-// YoloMode v3.0.0 -- Auto-accept for Antigravity
+// YoloMode v3.1 -- Auto-accept for Antigravity
 // Works in: Editor, Terminal, Agent Manager (standalone)
 // Architecture: Event-driven three-state (IDLE/FAST/SLOW) + heartbeat
-//               + CDP fallback for agentSidePanel accept
+//               + CDP for button clicking in all targets
 // ============================================================
 
 const State = { IDLE: 'IDLE', FAST: 'FAST', SLOW: 'SLOW' };
@@ -25,20 +25,13 @@ let eventListeners = [];
 let textChangeTimer;
 let logLineCount = 0;
 const MAX_LOG_LINES = 1000;
-let commandsVerified = false;
+
 let windowFocused = true;
 let lastTickTime = Date.now();    // sleep/lock detection
 let sleepCheckInterval;           // drift check timer
 let isAccepting = false;          // re-entrancy guard
 
-// Accept commands (VS Code API path)
-const ACCEPT_COMMANDS = [
-    'antigravity.agent.acceptAgentStep',
-    'antigravity.terminalCommand.accept',
-    'antigravity.command.accept',
-    'antigravity.prioritized.agentAcceptAllInFile',
-    'antigravity.prioritized.agentAcceptFocusedHunk',
-];
+
 
 // --- Config helper ---
 function cfg(key) {
@@ -135,12 +128,7 @@ function insertPortIntoArgv(rawContent, port) {
     return before + (needsComma ? ',' : '') + `\n    "remote-debugging-port": ${port}\n` + after;
 }
 
-function updatePortInArgv(rawContent, newPort) {
-    return rawContent.replace(
-        /("remote-debugging-port"\s*:\s*)\d+/,
-        `$1${newPort}`
-    );
-}
+
 
 async function ensureDebugPort() {
     const preferredPort = cfg('cdpPort');
@@ -194,7 +182,7 @@ async function ensureDebugPort() {
 }
 
 // CDP state — persistent per-target WebSocket pool
-let cdpTargetPool = new Map(); // Map<targetId, { ws, title, type, msgId, callbacks, isWebview, observerInjected }>
+let cdpTargetPool = new Map(); // Map<targetId, { ws, title, type, msgId, callbacks }>
 let cdpDiscoveryTimer = null;
 let cdpPort = null;
 
@@ -253,8 +241,6 @@ function cdpConnectTarget(target) {
         type: target.type,
         msgId: 1,
         callbacks: {},
-        isWebview: null,       // null = unchecked, true/false = cached
-        observerInjected: false,
     };
 
     try {
@@ -322,9 +308,6 @@ async function cdpDiscoverAndConnect(port) {
         if (newCount > 0) {
             log(`[${new Date().toLocaleTimeString()}] CDP: Discovered ${newCount} new target(s) (${cdpTargetPool.size} total)`);
         }
-        // Always log target types for diagnostics
-        const types = targets.map(t => `${t.type}:${(t.title || t.url || '').substring(0, 30)}`);
-        log(`[${new Date().toLocaleTimeString()}] CDP TARGETS: ${targets.length} total [${types.join(', ')}]`);
     } catch (err) {
         // Silent — discovery will retry next cycle
     }
@@ -354,7 +337,8 @@ function cdpDisconnect() {
 // ============================================================
 
 // NOTE: Antigravity buttons include keyboard shortcut text in textContent
-// e.g. "RunAlt+⌥↵" not just "Run". So we use startsWith matching, not exact match.
+// e.g. "RunAlt+⌥↵" not just "Run". We use startsWith matching.
+// "Run" buttons require a blue/primary background to avoid clicking random elements.
 const CDP_ACCEPT_SCRIPT = `
     (function() {
         var clicked = 0;
@@ -365,25 +349,18 @@ const CDP_ACCEPT_SCRIPT = `
             if (!/^(Run|Accept|Accept All|Allow|Allow Once|Allow This Conversation|Yes)/i.test(text)) continue;
             if (btn.offsetParent === null) continue;
             if (btn.disabled) continue;
+            // "Run" is ambiguous — require blue/primary background
+            if (/^Run/i.test(text)) {
+                var bg = window.getComputedStyle(btn).backgroundColor;
+                var m = bg.match(/\\d+/g);
+                if (!m || !(parseInt(m[2]) > parseInt(m[0]) && parseInt(m[2]) > parseInt(m[1]))) continue;
+            }
             if (btn.dataset.yoloClicked && Date.now() - parseInt(btn.dataset.yoloClicked) < 5000) continue;
             btn.dataset.yoloClicked = Date.now().toString();
             btn.click();
             clicked++;
         }
         return clicked;
-    })()
-`;
-
-// Alt+Enter on #conversation — proven fallback for IDE side panel
-const ALT_ENTER_SCRIPT = `
-    (function() {
-        var conv = document.querySelector('#conversation');
-        if (!conv) return 0;
-        conv.dispatchEvent(new KeyboardEvent('keydown', {
-            key: 'Enter', altKey: true, shiftKey: false,
-            bubbles: true, cancelable: true
-        }));
-        return 1;
     })()
 `;
 
@@ -583,46 +560,7 @@ function disposeEventListeners() {
     eventListeners = [];
 }
 
-// --- Command verification ---
-async function verifyCommands() {
-    try {
-        const allCommands = await vscode.commands.getCommands(true);
-        const commandSet = new Set(allCommands);
-        let found = 0;
-        for (const cmdId of ACCEPT_COMMANDS) {
-            if (commandSet.has(cmdId)) {
-                found++;
-            } else {
-                log(`[${new Date().toLocaleTimeString()}] WARNING: Command not found: ${cmdId}`);
-            }
-        }
-        commandsVerified = true;
-        log(`[${new Date().toLocaleTimeString()}] Verified ${found}/${ACCEPT_COMMANDS.length} commands available`);
-        if (found === 0) {
-            log(`[${new Date().toLocaleTimeString()}] WARNING: No Antigravity accept commands found. Is this Antigravity IDE?`);
-        }
-    } catch (err) {
-        log(`[${new Date().toLocaleTimeString()}] Command verification failed: ${err.message}`);
-    }
-}
 
-// --- Conflicting extension detection ---
-function checkConflictingExtensions() {
-    const competitors = [
-        'pesosz.antigravity-auto-accept',
-        'MunKhin.auto-accept-agent',
-    ];
-    for (const id of competitors) {
-        const ext = vscode.extensions.getExtension(id);
-        if (ext) {
-            const name = ext.packageJSON.displayName || id;
-            log(`[${new Date().toLocaleTimeString()}] WARNING: Conflicting extension detected: ${name}`);
-            vscode.window.showWarningMessage(
-                `YoloMode: "${name}" is also installed and may conflict. Consider disabling it.`
-            );
-        }
-    }
-}
 
 // --- Sleep/lock recovery ---
 function startSleepDetection() {
@@ -642,7 +580,7 @@ function startSleepDetection() {
 // --- Activation ---
 function activate(context) {
     outputChannel = vscode.window.createOutputChannel('YoloMode');
-    log('=== YoloMode v3.1.0 activated ===');
+    log('=== YoloMode v3.1.1 activated ===');
     log(`Time: ${new Date().toLocaleString()}`);
 
     // Status bar
@@ -666,12 +604,6 @@ function activate(context) {
                 vscode.window.showInformationMessage('YoloMode: ON');
             } else {
                 log(`[${new Date().toLocaleTimeString()}] === DISABLED ===`);
-                // Deactivate observers in all targets before disconnecting
-                for (const [id, entry] of cdpTargetPool) {
-                    if (entry.ws && entry.ws.readyState === WebSocket.OPEN) {
-                        try { cdpSendTo(entry, 'Runtime.evaluate', { expression: 'window.__yolomode_active = false', returnByValue: true }); } catch (_) { }
-                    }
-                }
                 clearAllTimers();
                 disposeEventListeners();
                 cdpDisconnect();
@@ -704,10 +636,8 @@ function activate(context) {
         registerEventListeners();
         startHeartbeat();
         startSleepDetection();
-        checkConflictingExtensions();
-        // Delayed start: wait 3s for Antigravity commands to register
+        // Delayed start: wait 3s for Antigravity to fully initialize
         setTimeout(() => {
-            verifyCommands();
             transitionTo(State.FAST, 'activate');
         }, 3000);
         updateStatusBar('$(clock) YOLO', undefined);
